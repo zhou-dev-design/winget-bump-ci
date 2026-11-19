@@ -1,0 +1,63 @@
+# 独立调度的 winget 清单跟版器
+#
+# 为什么单独开一个仓库：GitHub 文档明确 —— 公共仓库被 fork 之后，
+# scheduled workflows 默认不启用。实测 fork 里 event=schedule 的运行数长期为 0，
+# 而 workflow 的 state 仍显示 active、UI 也不给启用按钮（点不到）。换个非 fork 仓库即可。
+#
+# 它不克隆 winget-pkgs（78 万个文件、近 1GB），全部走 API：
+#   读版本表 → 取基底清单 → 生成新版本 → blobs/trees/commits 写进 fork 的 master → 向上游开 PR
+#
+# 需要 secret：GH_TOKEN —— classic PAT，勾 public_repo
+#   （fine-grained 不行：不能向「你不是成员的公共仓库」提交内容）
+# 手动触发：Actions → bump winget manifests → Run workflow
+
+name: bump winget manifests
+
+on:
+  schedule:
+    # 每 15 分钟，但避开 :00 / :15 / :30 / :45 —— 整点是调度高峰，实测会晚 15~45 分钟
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read            # 只读本仓库（脚本在里面）；写 fork 一律用 GH_TOKEN
+
+concurrency:
+  group: bump-winget
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: windows-latest  # 需要 winget validate，别改成 ubuntu
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      FORK: zhou-dev-design/winget-pkgs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查凭据
+        shell: pwsh
+        run: |
+          if (-not $env:GH_TOKEN) {
+            throw '缺少 GH_TOKEN secret：Settings → Secrets and variables → Actions 里加一个 classic PAT（勾 public_repo）'
+          }
+          Write-Host "GH_TOKEN 已配置（长度 $($env:GH_TOKEN.Length)）"
+
+      - name: 探测新版本 → 生成清单 → 写进 fork → 开 PR
+        shell: pwsh
+        run: |
+          $wd = Join-Path $env:RUNNER_TEMP 'winget-work'
+          New-Item -ItemType Directory -Force -Path $wd | Out-Null
+          ./bump-winget.ps1 -RepoRoot $wd -WorkDir $wd -Fork $env:FORK -ApiCommit -OpenPr
+
+      - name: 汇总
+        if: always()
+        shell: pwsh
+        run: |
+          $wd = Join-Path $env:RUNNER_TEMP 'winget-work'
+          if (-not (Test-Path $wd)) { Write-Host '本轮没有生成任何文件'; exit 0 }
+          $files = @(Get-ChildItem -Recurse -File $wd)
+          Write-Host "本轮生成 $($files.Count) 个文件"
+          $files | Select-Object -First 12 | ForEach-Object { Write-Host "  $($_.FullName.Substring($wd.Length))" }
