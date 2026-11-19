@@ -1,0 +1,23 @@
+# 临时探测：验证本仓库的 schedule 到底会不会触发
+# 最小成本（不 checkout、只 echo），跑一次约 5 秒。
+# 若连续 3 个 */5 槽都没有运行记录 → 本仓库/本账号的 schedule 没注册上，
+# 任何「继续依赖 GitHub cron」的方案都不用再试。
+name: schedule probe
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: 时间戳
+        run: |
+          echo "probe ok"
+          date -u
