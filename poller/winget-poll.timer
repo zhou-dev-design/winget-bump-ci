@@ -1,0 +1,13 @@
+[Unit]
+Description=Run winget poller every 15 minutes
+
+[Timer]
+# 开机 2 分钟后先跑一次，之后每 15 分钟一次
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+# 关机期间错过的槽，开机后不要连补
+Persistent=false
+
+[Install]
+WantedBy=timers.target

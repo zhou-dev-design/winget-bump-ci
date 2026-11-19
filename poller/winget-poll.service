@@ -1,0 +1,14 @@
+[Unit]
+Description=winget manifest poller (dispatch bump only when a new version appears)
+Documentation=https://github.com/zhou-dev-design/winget-bump-ci
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 按实际部署路径改这两行
+Environment=STATE_DIR=/opt/winget-poll
+ExecStart=/opt/winget-poll/winget-poll.sh
+# 日志进 journal：journalctl -u winget-poll -n 50
+StandardOutput=journal
+StandardError=journal
