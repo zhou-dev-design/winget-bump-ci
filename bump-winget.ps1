@@ -588,6 +588,14 @@ foreach ($pkg in $packages) {
         if ($have -and (Get-NatKey $rel.Version) -le (Get-NatKey $have)) { Write-Ok '已是最新'; continue }
         if (-not $have) { Write-Warn2 "仓库里没有这个包，先手工放一份基底再自动跟版本"; continue }
 
+        # 上游已经有了（别人先交了 PR 并被合并）：不用再往 fork 里造一份，
+        # 等同步工作流把上游拉回来即可。否则会留下"内容可能不同"的重复目录，
+        # 将来 sync 时变成 add/add 冲突。
+        if (Test-UpstreamHasVersion $pkg.Id $rel.Version) {
+            Write-Ok "上游已经有 $($rel.Version)，跳过（等 sync 拉回 fork）"
+            continue
+        }
+
         # 确认要发版了，才去下载安装包算哈希
         $missing = $false
         foreach ($sp in $rel.Specs) {

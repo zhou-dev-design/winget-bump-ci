@@ -1,0 +1,44 @@
+# 定时把上游 microsoft/winget-pkgs 合并进 fork（等价于网页的 "Sync fork"，但能自动跑）
+#
+# 为什么放在这里而不是 fork 里：fork 仓库的 schedule 默认不触发（见 README 说明），
+# 所以调度必须放在这个非 fork 仓库，通过 merge-upstream API 去动 fork。
+#
+# 与 bump 的关系：
+#   - bump 往 fork 写「我抢跑的版本」，sync 把「上游的新内容」拉回来，两边都会改 master；
+#   - 上游合了你的 PR 之后，两边内容一致，git 自动解掉，不会冲突；
+#   - 真正的冲突只出现在「上游先合了别人为同一版本提交的 PR，且字节不同」，此时会红。
+
+name: sync fork with upstream
+
+on:
+  schedule:
+    # 每小时 :23（避开整点；bump 在 :07/:22/:37/:52，错开一点减少同时写入）
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read          # 本仓库无需写；动 fork 一律用 GH_TOKEN
+
+concurrency:
+  group: sync-fork
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      FORK: zhou-dev-design/winget-pkgs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 合并上游 master 到 fork
+        shell: pwsh
+        run: ./sync-fork.ps1
+
+      - name: 汇总
+        if: always()
+        shell: pwsh
+        run: Write-Host "job status = ${{ job.status }}"

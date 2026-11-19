@@ -21,15 +21,35 @@ fine-grained token 不行——GitHub 不允许它向「你不是成员的公共
 
 ## 触发
 
-- 定时：`cron: '7,22,37,52 * * * *'`（约 15 分钟一轮，避开整点高峰）
-- 手动：Actions → `bump winget manifests` → Run workflow
+- **bump**：`cron: '7,22,37,52 * * * *'`（约 15 分钟一轮，避开整点高峰）+ 手动
+- **sync**：`cron: '23 * * * *'`（每小时把上游合并进 fork）+ 手动
+
+## fork 同步（sync-fork.ps1）
+
+等价于网页上的 **Sync fork**，只是能定时跑。调的是
+`POST /repos/{fork}/merge-upstream`，让 GitHub 服务端做合并。
+
+要点：
+
+- fork 里通常有你抢跑的版本提交，所以这是**合并**（会多一个 merge commit），不是快进；
+- 上游合了你的 PR 之后，两边内容完全相同，git 自动解掉，不冲突；
+- 唯一会冲突的情况：上游先合了「别人为同一版本」提交的 PR，且清单字节和你 fork 里的不同。
+  这时工作流会红，并按提示给三种处理方式（本地合 / 删掉 fork 里那份 / 网页手工解）。
 
 ## 文件
 
 | 文件 | 说明 |
 | --- | --- |
-| `.github/workflows/bump.yml` | 工作流定义 |
-| `bump-winget.ps1` | 实际干活的脚本（与 `winget-local/ci-bump.ps1` 同源） |
+| `.github/workflows/bump.yml` | 跟版工作流（15 分钟一轮） |
+| `.github/workflows/sync-fork.yml` | 同步工作流（每小时一轮） |
+| `bump-winget.ps1` | 跟版脚本（与 `winget-local/ci-bump.ps1` 同源） |
+| `sync-fork.ps1` | 同步脚本 |
+
+## 为什么不放在 fork 里
+
+fork 仓库的 `schedule` 默认不触发：`event=schedule` 的运行数会一直是 0，
+而 workflow 状态却显示 `active`、UI 也没有「启用」按钮。所以调度必须放在非 fork 仓库。
+这也是本仓库存在的唯一理由。
 
 ## 本地试跑
 
