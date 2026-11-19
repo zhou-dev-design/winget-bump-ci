@@ -55,7 +55,7 @@ DSH_ID='DeepSeek.DeepSeekHarnessDesktop'
 
 UA='winget-poll/1.0'
 TMP=$(mktemp) || exit 1
-trap 'rm -f "$TMP" "$TMP.body"' EXIT
+trap 'rm -f "$TMP" "$TMP.body" 2>/dev/null || true' EXIT
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "错误：$*"; exit 1; }
@@ -67,8 +67,11 @@ TOKEN=$(tr -d ' \t\r\n' < "$TOKEN_FILE")
 [ -n "$TOKEN" ] || die 'token 文件是空的'
 
 mkdir -p "$STATE_DIR"
+# 状态文件必须先存在：POSIX 规定 `.` 读不到文件时非交互 shell 直接退出（dash 就是这么干的，
+# `|| true` 拦不住），首次运行会静默 exit 1，一个字节日志都没有。
+[ -f "$STATE_FILE" ] || : > "$STATE_FILE"
 # shellcheck disable=SC1090
-. "$STATE_FILE" 2>/dev/null || true
+. "$STATE_FILE"
 : "${VSCODE_OK:=}" "${DSH_OK:=}" "${VSCODE_TRY:=0}" "${DSH_TRY:=0}" "${LAST_SYNC:=0}"
 
 # ---- GitHub API：body 落到 $TMP.body，回显 HTTP 状态码 ----
@@ -114,8 +117,18 @@ save_state() {
 }
 
 # ---- 1. VS Code ----
+# 家宽/跨境网络下偶发连不上，重试 3 次再认输（一次失败就整天不检测太脆）
 vscode_ver=''
-_j=$(curl -sS --max-time 30 -H "User-Agent: $UA" "$VSCODE_PROBE" 2>/dev/null) || _j=''
+_j=''
+_i=1
+while [ "$_i" -le 3 ]; do
+  if _j=$(curl -sS --max-time 30 -H "User-Agent: $UA" "$VSCODE_PROBE" 2>/dev/null) && [ -n "$_j" ]; then
+    break
+  fi
+  _j=''
+  _i=$((_i + 1))
+  if [ "$_i" -le 3 ]; then sleep 5; fi
+done
 if [ -n "$_j" ]; then
   vscode_ver=$(printf '%s' "$_j" | sed -n 's/.*"productVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 fi
@@ -153,7 +166,7 @@ if [ "$_c" = 200 ]; then
       fi
       _tag=$(printf '%s' "$obj" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p')
       _pub=$(printf '%s' "$obj" | sed -n 's/.*"published_at":[[:space:]]*"\([^"]*\)".*/\1/p')
-      [ -n "$_tag" ] && printf '%s %s\n' "${_pub:-0000}" "$_tag"
+      if [ -n "$_tag" ]; then printf '%s %s\n' "${_pub:-0000}" "$_tag"; fi
     done | sort -r | head -n1 | awk '{print $2}'
   )
   case "$dsh_tag" in
@@ -166,7 +179,7 @@ else
 fi
 
 if [ -z "$dsh_ver" ]; then
-  [ "$_c" = 200 ] && log 'DeepSeek 没解析到版本号，本轮不处理它'
+  if [ "$_c" = 200 ]; then log 'DeepSeek 没解析到版本号，本轮不处理它'; fi
 elif [ "$dsh_ver" != "$DSH_OK" ]; then
   if manifest_exists "$DSH_DIR/$dsh_ver"; then
     DSH_OK=$dsh_ver
