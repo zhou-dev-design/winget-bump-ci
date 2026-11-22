@@ -1,0 +1,54 @@
+# 手动重跑 winget-pkgs 的 PR 验证
+#
+# 为什么要这个：验证只认 moderator 的 `@wingetbot run`，作者没有这个权限。
+# 但验证 App 会响应 PR 的 synchronize 事件（分支有新提交），所以推一个
+# tree 完全相同的「空提交」就能让它重新排队，而清单文件一个字节都不变。
+#
+# 用法：Actions → 选本工作流 → Run workflow → 填分支名（默认已填 VS Code 那个）
+# 想看它打算做什么而先不写：dry_run 选 true。
+name: re-run validation (empty commit)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '要重跑的 PR 分支'
+        required: true
+        default: 'bump/Microsoft.VisualStudioCode/1.147.0'
+      dry_run:
+        description: '只打印，不写入'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read          # 本仓库只读；写 fork 一律用 GH_TOKEN
+
+concurrency:
+  group: rerun-validation
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      FORK: zhou-dev-design/winget-pkgs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查凭据
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::缺少 GH_TOKEN secret（classic PAT，勾 public_repo）"
+            exit 1
+          fi
+          echo "GH_TOKEN 已配置（长度 ${#GH_TOKEN}）"
+
+      - name: 建同 tree 的空提交并前移分支
+        run: |
+          ARGS="--branch ${{ inputs.branch }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python3 tools/rerun-validation.py $ARGS

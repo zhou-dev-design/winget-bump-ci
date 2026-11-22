@@ -135,3 +135,23 @@ $wd = Join-Path $env:TEMP 'winget-work'; New-Item -ItemType Directory -Force $wd
 ```
 
 去掉 `-DryRun` 才会真的写 fork；`-Only <包ID>` 可以只跑一个包。
+
+---
+
+## PR 验证卡住时，怎么自己重跑
+
+winget-pkgs 的验证只认 moderator 的 `@wingetbot run`（`doc/Moderation.md` 里写死了这是
+moderator 的 Trigger），普通作者发这个指令会被回 `Commenter does not have sufficient privileges`。
+但验证 App 会响应 PR 的 `synchronize` 事件 —— 分支有了新提交就会重新排队。
+
+所以 `rerun.yml` 干的是：**用当前 commit 的同一个 tree 造一个「空提交」，再把分支 ref 指过去**。
+文件一个字节都不变，但 PR head 变了，验证就会起一个全新实例。
+
+用法：Actions → `re-run validation (empty commit)` → Run workflow。
+`branch` 默认填了 VS Code 那个分支，`dry_run` 选 true 可以先看它读到的 head / tree 而不写入。
+
+注意：
+
+- 这只是重新排队，已经确认是 Defender 竞态的话，可能还要再撞一次，重跑一两次是正常的；
+- 空提交会留在 PR 历史里（内容为空，01 检查只看文件差异，不受影响）；
+- 如果维护者已经自己重跑过（PR 时间线里有 `@wingetbot run` by `wingetbot`），就不要重复点。
