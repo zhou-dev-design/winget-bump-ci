@@ -15,7 +15,9 @@
 
 用法
   GH_TOKEN=xxx python3 rerun-validation.py --branch bump/<包>/<版本> [--dry-run]
-  GH_TOKEN 也可以写成环境变量，或用 --token-file 指定文件
+  GH_TOKEN=xxx python3 rerun-validation.py --auto [--dry-run]
+    --auto：自动找出「自己名下开着的 PR」的分支逐个重跑（版本号常变时不用改默认值）
+  token 也可以用 --token-file 指定文件
 """
 
 import argparse
@@ -23,10 +25,12 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 API = "https://api.github.com"
-UA = "winget-rerun/1.0"
+UPSTREAM = "microsoft/winget-pkgs"
+UA = "winget-rerun/1.1"
 
 
 class Api:
@@ -54,10 +58,73 @@ class Api:
                 return e.code, {"message": body[:400]}
 
 
+def rerun_one(api, fork, branch, message, dry_run):
+    ref_path = f"/repos/{fork}/git/ref/heads/{branch}"
+    code, ref = api.call("GET", ref_path)
+    if code != 200:
+        print(f"  x 读分支失败 {branch}（HTTP {code}）：{ref.get('message')}", file=sys.stderr)
+        return False
+    head = ref["object"]["sha"]
+
+    code, commit = api.call("GET", f"/repos/{fork}/git/commits/{head}")
+    if code != 200:
+        print(f"  x 读 commit 失败（HTTP {code}）：{commit.get('message')}", file=sys.stderr)
+        return False
+    tree = commit["tree"]["sha"]
+    print(f"  {branch}")
+    print(f"    head {head[:9]}   tree {tree[:9]}")
+
+    if dry_run:
+        print("    --dry-run：到此为止，没有写入")
+        return True
+
+    code, new = api.call("POST", f"/repos/{fork}/git/commits", {
+        "message": message,
+        "tree": tree,
+        "parents": [head],
+    })
+    if code != 201:
+        print(f"    x 建空提交失败（HTTP {code}）：{new.get('message')}", file=sys.stderr)
+        return False
+    new_sha = new["sha"]
+
+    code, _ = api.call("PATCH", f"/repos/{fork}/git/refs/heads/{branch}", {
+        "sha": new_sha,
+        "force": False,
+    })
+    if code != 200:
+        print("    x 移动分支失败（分支可能刚被别人推过），重跑本脚本即可", file=sys.stderr)
+        return False
+
+    print(f"    新 head {new_sha[:9]} → 验证会重新排队")
+    return True
+
+
+def collect_my_open_prs(api, fork):
+    """自己名下、开着、且 head 在我们 fork 里的 PR → [(号, 分支名)]"""
+    q = urllib.parse.quote(f"repo:{UPSTREAM} is:pr is:open author:@me")
+    code, res = api.call("GET", f"/search/issues?q={q}&per_page=30")
+    if code != 200:
+        print(f"x 搜索 PR 失败（HTTP {code}）：{res.get('message')}", file=sys.stderr)
+        return []
+    out = []
+    for it in res.get("items", []):
+        code, pr = api.call("GET", f"/repos/{UPSTREAM}/pulls/{it['number']}")
+        if code != 200:
+            continue
+        head = pr.get("head") or {}
+        repo = ((head.get("repo") or {}).get("full_name") or "").lower()
+        if repo != fork.lower():
+            continue
+        out.append((it["number"], head.get("ref")))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fork", default=os.environ.get("FORK", "zhou-dev-design/winget-pkgs"))
-    ap.add_argument("--branch", required=True)
+    ap.add_argument("--branch", default=None)
+    ap.add_argument("--auto", action="store_true", help="重跑自己名下所有开着的 PR")
     ap.add_argument("--message", default="chore: re-trigger validation (previous run hit an infra error)")
     ap.add_argument("--token-file", default=None)
     ap.add_argument("--dry-run", action="store_true")
@@ -73,47 +140,23 @@ def main():
         return 1
 
     api = Api(token)
-    ref_path = f"/repos/{args.fork}/git/ref/heads/{args.branch}"
 
-    code, ref = api.call("GET", ref_path)
-    if code != 200:
-        print(f"读分支失败 {args.branch}（HTTP {code}）：{ref.get('message')}", file=sys.stderr)
+    if args.auto:
+        prs = collect_my_open_prs(api, args.fork)
+        if not prs:
+            print("没有找到自己名下开着的 PR（head 在本 fork 里）")
+            return 0
+        print(f"共 {len(prs)} 个开着的 PR：")
+        ok = True
+        for num, branch in prs:
+            print(f"  PR #{num}")
+            ok = rerun_one(api, args.fork, branch, args.message, args.dry_run) and ok
+        return 0 if ok else 1
+
+    if not args.branch:
+        print("要么给 --branch，要么用 --auto", file=sys.stderr)
         return 1
-    head = ref["object"]["sha"]
-    print(f"当前 head  {head[:9]}  ({args.branch})")
-
-    code, commit = api.call("GET", f"/repos/{args.fork}/git/commits/{head}")
-    if code != 200:
-        print(f"读 commit 失败（HTTP {code}）：{commit.get('message')}", file=sys.stderr)
-        return 1
-    tree = commit["tree"]["sha"]
-    print(f"内容指纹    {tree[:9]}  （新提交会复用这一份，所以文件不变）")
-
-    if args.dry_run:
-        print("--dry-run：到此为止，没有写入任何东西")
-        return 0
-
-    code, new = api.call("POST", f"/repos/{args.fork}/git/commits", {
-        "message": args.message,
-        "tree": tree,
-        "parents": [head],
-    })
-    if code != 201:
-        print(f"建空提交失败（HTTP {code}）：{new.get('message')}", file=sys.stderr)
-        return 1
-    new_sha = new["sha"]
-    print(f"新提交      {new_sha[:9]}")
-
-    code, _ = api.call("PATCH", f"/repos/{args.fork}/git/refs/heads/{args.branch}", {
-        "sha": new_sha,
-        "force": False,
-    })
-    if code != 200:
-        print(f"移动分支失败（HTTP {code}）——分支可能刚被别人推过，重跑本脚本即可", file=sys.stderr)
-        return 1
-
-    print("分支已前移，PR 会收到 synchronize 事件 → 验证重新排队")
-    return 0
+    return 0 if rerun_one(api, args.fork, args.branch, args.message, args.dry_run) else 1
 
 
 if __name__ == "__main__":

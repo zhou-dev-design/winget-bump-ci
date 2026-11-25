@@ -142,11 +142,13 @@ PR 开出来了，但写 fork `master` 那段挂了，job 全红却有 PR 产出
 
 | 文件 | 说明 |
 | --- | --- |
-| `.github/workflows/bump.yml` | 跟版工作流（由轮询器或手动触发） |
-| `.github/workflows/sync-fork.yml` | 同步工作流（由轮询器或手动触发） |
+| `.github/workflows/bump.yml` | 跟版工作流（**手动**触发，开 PR 并补 CLA） |
+| `.github/workflows/sync-fork.yml` | 同步工作流（小时级 cron + 手动） |
+| `.github/workflows/rerun.yml` | PR 验证卡住时一键重跑（手动） |
 | `bump-winget.ps1` | 跟版脚本（与 `winget-local/ci-bump.ps1` 同源） |
 | `sync-fork.ps1` | 同步脚本 |
-| `poller/` | 外部轮询器 |
+| `tools/rerun-validation.py` | 造同 tree 空提交、前移 PR 分支 |
+| `poller/` | 外部轮询器（可选，装了才有自动跟版） |
 
 ## 本地试跑
 

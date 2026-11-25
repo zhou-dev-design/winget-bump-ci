@@ -4,7 +4,9 @@
 # 但验证 App 会响应 PR 的 synchronize 事件（分支有新提交），所以推一个
 # tree 完全相同的「空提交」就能让它重新排队，而清单文件一个字节都不变。
 #
-# 用法：Actions → 选本工作流 → Run workflow → 填分支名（默认已填 VS Code 那个）
+# 用法：Actions → 选本工作流 → Run workflow
+#   branch 留空 = 自动把「你名下所有开着的 PR」逐个重跑（推荐，版本号变了也不用改默认值）
+#   branch 填值 = 只重跑那一个分支
 # 想看它打算做什么而先不写：dry_run 选 true。
 name: re-run validation (empty commit)
 
@@ -12,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: '要重跑的 PR 分支'
-        required: true
-        default: 'bump/Microsoft.VisualStudioCode/1.147.0'
+        description: '只重跑这一个分支（留空 = 自动找你名下所有开着的 PR）'
+        required: false
+        default: ''
       dry_run:
         description: '只打印，不写入'
         type: boolean
@@ -49,6 +51,10 @@ jobs:
 
       - name: 建同 tree 的空提交并前移分支
         run: |
-          ARGS="--branch ${{ inputs.branch }}"
-          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          python3 tools/rerun-validation.py $ARGS
+          EXTRA=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then EXTRA="--dry-run"; fi
+          if [ -n "${{ inputs.branch }}" ]; then
+            python3 tools/rerun-validation.py --branch "${{ inputs.branch }}" $EXTRA
+          else
+            python3 tools/rerun-validation.py --auto $EXTRA
+          fi
