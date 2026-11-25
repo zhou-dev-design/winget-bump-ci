@@ -73,6 +73,9 @@ fine-grained token 不行 —— GitHub 不允许它向「你不是成员的公�
 任何一段出错只记 `$script:failed`，另一段照常跑完，最后由 `exit 1` 统一标红。
 所以 **「PR 开出来了但 job 是红的」是正常的组合** —— 见下面「排错」。
 
+唯一的例外是 `validate` 没过：脚本会把这个「包/版本」记下来，PR 阶段直接跳过，
+避免把没通过校验的清单推上去（#20 就是踩了这个坑）。
+
 现在每段出错都会打 `::error title=...::` 注解，在 Actions 的 **Annotations** 面板能直接看到原因
 （日志下载需要仓库 admin 权限，注解不需要）。API 报错也会带上 HTTP 状态码和响应体。
 
@@ -200,7 +203,8 @@ $wd = Join-Path $env:TEMP 'winget-work'; New-Item -ItemType Directory -Force $wd
 | 现象 | 含义 | 怎么办 |
 | --- | --- | --- |
 | PR 开出来了，但 job 红 | 第一段（写 fork `master`）失败，第二段（开 PR）成功 | 看 Annotations 里的 `::error::`，按 HTTP 状态码判断；PR 本身没问题 |
-| `winget validate 没过` | 生成清单没通过校验 | 注解里带 winget 原始输出，按提示改模板 |
+| `winget validate 失败（exit 1）` 但输出是 `succeeded with warnings` | runner 上的 winget 比清单 schema 旧，把 warning 判成失败（#20 的真因） | 已在脚本里修掉：加 `--ignore-warnings --output-locale en-US`，并以输出文本为准（`succeeded` = 通过）。这类 warning 不影响 PR 那边的校验 |
+| `winget validate 失败` 且输出 `Manifest Error: ...` | 生成清单真的不合规 | 注解里带 winget 原始输出，按提示改模板 |
 | 08 红，四包都 `Completed` | 验证机 Defender 扫描撞车 | 等维护者重跑，或自己跑 `rerun.yml` |
 | sync 红（409） | 上游也有同一版本且字节不同 | 按日志提示三选一处理 |
 | `Commenter does not have sufficient privileges` | 你用作者身份发了 `@wingetbot run` | 那是指令只有 moderator 能用，改用 `rerun.yml` |

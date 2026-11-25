@@ -321,10 +321,43 @@ function Test-Manifest([string]$Id, [string]$Version) {
     $dir = Join-Path $WorkDir "$($p.RelPath)/$Version"
     $wg = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $wg) { Write-Warn2 'runner 上找不到 winget，跳过 validate'; return $true }
-    $out = & winget validate --manifest $dir 2>&1
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'winget validate 通过'; return $true }
-    $script:LastValidateError = (($out | Out-String).Trim())
-    Write-Warn2 "winget validate 失败：`n$($script:LastValidateError)"
+
+    # winget 的退出码不可靠（#20 实测）：runner 上的 winget 比清单 schema 旧时，
+    # 会报 "The schema header URL does not match the expected pattern" 这类 warning，
+    # 然后把「Manifest validation succeeded with warnings」判成退出码 1。
+    # 而同一份清单在本机 winget 1.30 上是 exit 0。所以：
+    #   1) 先加 --ignore-warnings --output-locale en-US，尽量让它直接返回 0、输出稳定英文；
+    #   2) 判据以输出文本为准，退出码只作兜底。
+    $argv = @('validate', '--manifest', $dir, '--ignore-warnings', '--output-locale', 'en-US')
+    $out = & winget @argv 2>&1
+    $code = $LASTEXITCODE
+    $text = ((($out | Out-String) -replace "`r", '')).Trim()
+
+    # 老版本 winget 不认识这两个参数时退一步，用原始命令再跑一次
+    if ($code -ne 0 -and $text -match '(?i)unrecognized|unknown (option|argument)|无法识别|未知参数') {
+        Write-Dim 'runner 的 winget 不支持 --ignore-warnings，退回原始命令'
+        $out = & winget validate --manifest $dir 2>&1
+        $code = $LASTEXITCODE
+        $text = ((($out | Out-String) -replace "`r", '')).Trim()
+    }
+
+    $warns = @($out | Where-Object { "$_" -match '(?i)Manifest Warning:|警告' })
+    foreach ($w in $warns) {
+        Write-Host "  [warn] $((("$w") -replace '(?i)^\s*Manifest Warning://s*', '').Trim())"
+    }
+
+    $succeeded = $text -match '(?i)validation succeeded|验证成功'
+    $failed = $text -match '(?i)validation failed|Manifest Error|验证失败'
+
+    if ($succeeded) {
+        $suffix = if ($warns.Count -gt 0) { "（$($warns.Count) 条 warning，已忽略）" } else { '' }
+        Write-Ok "winget validate 通过$suffix"
+        return $true
+    }
+    if (-not $failed -and $code -eq 0) { Write-Ok 'winget validate 通过'; return $true }
+
+    $script:LastValidateError = $text
+    Write-Warn2 "winget validate 失败（exit $code）：`n$text"
     return $false
 }
 
@@ -610,6 +643,9 @@ $packages = @(
 
 $bumped = @()
 $script:failed = $false
+# 记下 validate 没过的 包/版本：PR 阶段要跳过它们，
+# 否则会像 #20 那样「validate 判失败、PR 却照样开出来」，看着自相矛盾且可能推坏清单
+$script:badManifests = @{}
 foreach ($pkg in $packages) {
     if ($Only -and $Only -ne $pkg.Id) { continue }
     Write-Head "$($pkg.Id)  [$($pkg.Source)]"
@@ -653,6 +689,7 @@ foreach ($pkg in $packages) {
 
         $relPath = New-VersionFromBase -Id $pkg.Id -Base $have -Version $rel.Version -Specs $rel.Specs -ReleaseDate $rel.ReleaseDate
         if (-not (Test-Manifest $pkg.Id $rel.Version)) {
+            $script:badManifests["$($pkg.Id)/$($rel.Version)"] = $true
             # 把 winget 的原始输出一起抛出去：注解里能直接看到是哪条没通过
             throw "validate 没过，不提交：$($script:LastValidateError)"
         }
@@ -723,6 +760,9 @@ if ($OpenPr) {
                 if (-not $repoVers) { continue }
                 $ver = $repoVers[-1]
 
+                if ($script:badManifests.ContainsKey("$($pkg.Id)/$ver")) {
+                    Write-Warn2 "$($pkg.Id) $ver 的清单没通过 validate，不开 PR"; continue
+                }
                 if (Test-UpstreamHasVersion $pkg.Id $ver) { Write-Dim "$($pkg.Id) $ver 上游已有，跳过"; continue }
                 $open = Get-OpenPrCount $pkg.Id $ver
                 if ($open -gt 0) { Write-Dim "$($pkg.Id) $ver 已有开着的 PR，跳过"; continue }
