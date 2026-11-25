@@ -1,8 +1,51 @@
 # winget-bump-ci
 
-给 `zhou-dev-design/winget-pkgs` 里两个包跟版本的小工作流（Microsoft.VisualStudioCode、DeepSeek.DeepSeekHarnessDesktop）。
+给 `zhou-dev-design/winget-pkgs` 里两个包跟版本、开 PR、并在 PR 验证卡住时重跑的小仓库
+（`Microsoft.VisualStudioCode`、`DeepSeek.DeepSeekHarnessDesktop`）。
 
-工作流不克隆 winget-pkgs（78 万个文件 / 近 1 GB），全程走 GitHub API：
+不克隆 winget-pkgs（78 万个文件 / 近 1 GB），全程走 GitHub API。
+
+---
+
+## 三个工作流
+
+| 工作流 | 触发 | 干什么 |
+| --- | --- | --- |
+| `bump.yml` | **只能手动** | 探测新版本 → 生成清单 → `winget validate` → 写进 fork `master` → 向上游开 PR → 补 CLA 同意 |
+| `sync-fork.yml` | 每小时 cron + 手动 | 把上游 `microsoft/winget-pkgs` 合并进 fork（等价于网页的 Sync fork） |
+| `rerun.yml` | **只能手动** | PR 验证卡住时，造一个同 tree 的空提交把分支往前挪，触发重新验证 |
+
+原来还有一个 `schedule probe`（只为验证 GitHub 的 cron 到底会不会触发），结论已经明确，2026-11-25 删掉了。
+
+## 日常怎么用
+
+### 1. 软件出新版本了 → 手动跑 bump
+
+Actions → `bump winget manifests` → **Run workflow**。它会自己判断有没有新版本：
+
+- 有新版本：生成清单、校验、写进 fork、开 PR；
+- 没有新版本：一行 `已是最新` 就结束，几十秒。
+
+**没有自动触发。** 想要自动，见下面「可选：外部轮询器」。
+
+### 2. fork 落后上游 → 不用管
+
+`sync-fork.yml` 每小时自己合一次。注意 GitHub 的 cron 在这个账号上不稳定
+（实测间隔 2~5 小时），落后一会儿不影响什么，bump 时会跳过上游已有的版本。
+
+### 3. PR 的验证卡住了 → 手动跑 rerun
+
+Actions → `re-run validation (empty commit)` → Run workflow，`branch` 留空即可
+（自动扫你自己名下所有开着的 PR）。原理见下面「PR 验证卡住时」。
+
+---
+
+## 需要的 secret
+
+`GH_TOKEN`：classic PAT，勾 `public_repo`。
+fine-grained token 不行 —— GitHub 不允许它向「你不是成员的公共仓库」提交内容。
+
+## 清单是怎么生成的
 
 1. 读 fork 里的版本表（`contents` API）；
 2. 用最新版本的清单当基底（优先 raw CDN，失败退回 API base64）；
@@ -11,56 +54,94 @@
 5. `blobs → trees(base_tree) → commits → PATCH ref`，一条 commit 原子写入 fork 的 `master`；
 6. 从上游 master 建 `bump/<包>/<版本>` 分支并开 PR（分支里只有清单，不含 `.github`）。
 
-## 需要的 secret
+## 为什么 bump 是手动的（2026-11-25）
 
-`GH_TOKEN`：classic PAT，勾 `public_repo`。
-fine-grained token 不行——GitHub 不允许它向「你不是成员的公共仓库」提交内容。
+原来挂着 15 分钟的 cron。后来发现两件事，干脆改成手动：
 
-同时需要给**外部轮询器**一份同样的 token（见下面「触发方式」），这是唯一的手工步骤。
+1. **GitHub 的 cron 在这个账号上不可靠。** 建库后 2 小时 40 分内，bump 的 12 个槽、sync 的 3 个槽、
+   外加一个 `*/5` 最小探测工作流的 2 个槽**全部为 0**。已经排除：仓库 public、非 fork、默认分支
+   `main`、workflow 状态 active、手动能跑、GitHub 状态页无事故。后来它自己恢复了，但间隔 2~5 小时。
+2. **跟版不是高频动作**（VS Code 一周一版），手动点一下完全够，红了还能立刻看。
+
+### 脚本里其实是两段独立的流程
+
+这个很重要，否则会误解红色的含义：
+
+1. 探测 → 生成清单 → `validate` → **写进 fork `master`**；
+2. 从上游 master 建分支 → 写文件 → **向上游开 PR**。
+
+任何一段出错只记 `$script:failed`，另一段照常跑完，最后由 `exit 1` 统一标红。
+所以 **「PR 开出来了但 job 是红的」是正常的组合** —— 见下面「排错」。
+
+现在每段出错都会打 `::error title=...::` 注解，在 Actions 的 **Annotations** 面板能直接看到原因
+（日志下载需要仓库 admin 权限，注解不需要）。API 报错也会带上 HTTP 状态码和响应体。
+
+## CLA 同意（`-ClaAgree`）
+
+`@microsoft-github-policy-service` 要求**每个新 PR 都评论一次** `agree`，签过一次不免。
+不评论 → PR 一直挂着 `Needs-CLA`，永远合不进去。
+
+`bump.yml` 带 `-ClaAgree`：
+
+- 每开一个新 PR，立刻评论一次；
+- 收尾时再扫一遍自己名下「开着且带 `Needs-CLA`」的 PR，把历史遗留的补上。
+
+**注意**：这条评论是用你的 PAT 以你的身份发的，等于把 CLA 同意这件事交给 CI 代发。
 
 ---
 
-## 触发方式：外部轮询 → 有更新才 dispatch
+## PR 验证卡住时，怎么自己重跑
 
-### 为什么不用 GitHub 自己的 schedule
+winget-pkgs 的验证只认 moderator 的 `@wingetbot run`（`doc/Moderation.md` 写死了这是 moderator 的
+Trigger），普通作者发这个指令会被回 `Commenter does not have sufficient privileges`。
+但验证 App 会响应 PR 的 `synchronize` 事件 —— 分支有了新提交就会重新排队。
 
-`schedule` 在这个账号下**实测完全不触发**，两个仓库都一样：
+`rerun.yml` 干的是：**用当前 commit 的同一个 tree 造一个「空提交」，再把分支 ref 指过去**。
+文件一个字节都不变，但 PR head 变了，验证就会起一个全新实例。
 
-| 仓库 | 实测 |
-| --- | --- |
-| `zhou-dev-design/winget-pkgs`（fork） | 从建好到现在 `event=schedule` 运行数恒为 0 |
-| `zhou-dev-design/winget-bump-ci`（本仓库） | 建好后 2 小时 40 分内，bump 的 12 个槽、sync 的 3 个槽、外加一个 `*/5` 最小探测工作流的 2 个槽，**全部为 0** |
+用法：`branch` 留空 = 自动找你名下所有开着的 PR；填值 = 只重跑那一个。`dry_run` 选 true 可先看 head/tree。
 
-已经排除的原因：仓库是 public、不是 fork、默认分支是 `main`、两个 workflow 都是
-`state=active`、`workflow_dispatch` 手动能跑、GitHub 状态页无 Actions 事故。
-最小探测工作流只有一个 `date` 命令、5 秒跑完，它也不跑 —— 所以不是 cron 表达式或脚本的问题，
-是调度器没把本仓库收进去。
+注意：
 
-**结论：任何「继续依赖 GitHub cron」的方案都不必再试。**
+- 这只是重新排队，不保证一次就过（见下面 08 的说明）；
+- 空提交会留在 PR 历史里（内容为空，01 检查只看文件差异，不受影响）；
+- 维护者已经自己重跑过（时间线里有 `@wingetbot run` by `wingetbot`）就别重复点。
 
-### 那真正的「有更新再触发」怎么做
+## 08. Installation Validation 红了的常见原因
 
-GitHub 不允许把 webhook 装到别人的仓库上，所以别人的 release 事件没法直接变成我们的
-workflow 事件。只能：**某处定时轮询 → 发现版本变了 → `workflow_dispatch`**。
+它不是清单问题，而是验证服务**在真机上装完再让 Defender 扫一遍**这一步挂了。判据：
 
-轮询放在一台常开的机器上，脚本在 `poller/`：
+- **01–07 全绿 + 08 里四个安装包都是 `Completed` + 08 整体失败 → 一定是宿主环境问题**，等重跑；
+- 若某个安装包是 `Waiting` / 长时间 `InProgress` → 排队或超时，也是等；
+- 只有出现安装退出码非 0，或标签是 `Validation-Installation-Error` / `Validation-Unattended-Failed`，
+  才是清单本身要改。
+
+`Validation-Defender-Error` 目前是平台侧的系统性问题（同一时刻几十个 PR 一起挂），
+维护者知道，会手工认定通过（`Validation-Completed`）或批量重跑。
+
+## fork 同步要点
+
+- fork 里通常有你抢跑的版本提交，所以这是**合并**（会多一个 merge commit），不是快进；
+- 上游合了你的 PR 之后两边内容完全相同，git 自动解掉，不冲突；
+- 唯一会冲突的情况：上游先合了「别人为同一版本」提交的 PR，且清单字节和你 fork 里的不同。
+  这时工作流会红并给出三种处理方式（本地合 / 删掉 fork 里那份 / 网页手工解）。
+
+---
+
+## 可选：外部轮询器（想自动跟版才装）
+
+别人的 release 事件没法直接变成我们的 workflow 事件（webhook 只能装在自己仓库上），
+所以「自动」只能是「某处定时轮询 → 版本变了才 dispatch」。脚本在 `poller/`：
 
 | 文件 | 用途 |
 | --- | --- |
 | `poller/winget-poll.sh` | Linux / 飞牛 NAS 版（POSIX sh，只要 curl） |
-| `poller/winget-poll.service` / `.timer` | systemd 定时器（每 15 分钟） |
+| `poller/winget-poll.service` / `.timer` | systemd 定时器，每 15 分钟 |
 | `poller/winget-poll.ps1` | Windows 版（配合计划任务） |
 
-它每 15 分钟只做 3~5 个 HTTP 请求：
-
-1. 查 VS Code 稳定版版本号（1 次）；
-2. 查 DeepSeek Harness 最新 release（1 次；上游用 prerelease 发版，
-   所以不能用 `/releases/latest`，要拉列表按 `published_at` 挑）；
-3. 若「仓库里没有该版本」且「`bump/<包>/<版本>` 分支也不存在」→ dispatch `bump.yml`；
-4. 距上次 sync 超过 1 小时 → dispatch `sync-fork.yml`。
-
-**没有新版本时零 dispatch**，一年也不会白跑一次。已开 PR 但还没合并的版本也算「在流程里」，
-不会每小时重复触发。
+每 15 分钟只做 3~5 个请求：查 VS Code 版本、查 DeepSeek 最新 release；
+**仓库里没有该版本、且 `bump/<包>/<版本>` 分支也不存在**时才 dispatch `bump.yml`；
+距上次 sync 超过 1 小时则 dispatch `sync-fork.yml`。没有新版本时零触发。
 
 ### 部署：飞牛 NAS / 任意 Linux
 
@@ -69,133 +150,57 @@ mkdir -p /opt/winget-poll
 cp poller/winget-poll.sh /opt/winget-poll/
 chmod +x /opt/winget-poll/winget-poll.sh
 
-# token：和 GitHub Secrets 里那个一样的 classic PAT
-printf '%s' 'ghp_xxx' > /opt/winget-poll/token
+printf '%s' 'ghp_xxx' > /opt/winget-poll/token   # 和 GitHub Secrets 里同一个 PAT
 chmod 600 /opt/winget-poll/token
-
-# 先手工跑一次确认能通
-/opt/winget-poll/winget-poll.sh
+/opt/winget-poll/winget-poll.sh                   # 先手跑一次看日志
 
 cp poller/winget-poll.service poller/winget-poll.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now winget-poll.timer
-systemctl list-timers winget-poll.timer
 journalctl -u winget-poll -n 30 --no-pager
 ```
 
 ### 部署：Windows
 
 ```powershell
-# token.txt 放在脚本同目录
 'ghp_xxx' | Set-Content C:\winget-poll\token.txt -NoNewline
-
 schtasks /Create /SC MINUTE /MO 15 /TN winget-poll /F `
   /TR "pwsh -NoProfile -WindowStyle Hidden -File C:\winget-poll\winget-poll.ps1"
 ```
 
-计划任务里勾上「不管用户是否登录都运行」。机器关机期间错过的轮询会在下次开机补上
-（靠状态文件里的 `VSCODE_OK` / `DSH_OK`）。
-
-### bump 已改为手动触发（2026-11-25）
-
-`bump.yml` 的 `schedule` 已经删掉，只剩 `workflow_dispatch`。原因是 #20 那次：
-PR 开出来了，但写 fork `master` 那段挂了，job 全红却有 PR 产出，看着很迷惑。
-
-脚本里其实是**两段互相独立的流程**：
-
-1. 探测 → 生成清单 → `winget validate` → 用 API 写进 fork 的 `master`；
-2. 从上游 master 建分支 → 写文件 → 向上游开 PR。
-
-任何一段出错都只记 `$script:failed`，另一段照常跑完，最后由 `exit 1` 统一标红 ——
-所以"PR 成功但 job 失败"是正常的组合，不代表 PR 有问题。现在两段出错都会额外打
-`::error::` 注解，在 Actions 的 **Annotations** 面板能直接看到原因（日志下载需要 admin，注解不需要）。
-
-`sync-fork.yml` 仍然保留小时级 cron；`probe.yml` 保留为小时级哨兵，用来观察 GitHub 调度器是否恢复。
-
-### CLA 同意（-ClaAgree）
-
-`@microsoft-github-policy-service` 要求**每个新 PR 都评论一次** `agree`，签过一次不免。
-不评论 → PR 一直挂着 `Needs-CLA`，永远合不进去。
-
-`bump.yml` 现在带 `-ClaAgree`：
-
-- 每开一个新 PR，立刻评论一次；
-- 收尾时再扫一遍自己名下「开着且带 `Needs-CLA`」的 PR，把历史遗留的补上。
-
-**注意**：这条评论是用你的 PAT 以你的身份发的，等于你把 CLA 同意这件事交给了 CI 代发。
+计划任务里勾「不管用户是否登录都运行」。关机期间错过的轮询会在下次开机补上（靠状态文件）。
 
 ---
-
-## fork 同步（sync-fork.ps1）
-
-等价于网页上的 **Sync fork**，只是能定时跑。调的是
-`POST /repos/{fork}/merge-upstream`，让 GitHub 服务端做合并。
-
-要点：
-
-- fork 里通常有你抢跑的版本提交，所以这是**合并**（会多一个 merge commit），不是快进；
-- 上游合了你的 PR 之后，两边内容完全相同，git 自动解掉，不冲突；
-- 唯一会冲突的情况：上游先合了「别人为同一版本」提交的 PR，且清单字节和你 fork 里的不同。
-  这时工作流会红，并按提示给三种处理方式（本地合 / 删掉 fork 里那份 / 网页手工解）。
 
 ## 文件
 
 | 文件 | 说明 |
 | --- | --- |
-| `.github/workflows/bump.yml` | 跟版工作流（**手动**触发，开 PR 并补 CLA） |
+| `.github/workflows/bump.yml` | 跟版工作流（手动，开 PR 并补 CLA） |
 | `.github/workflows/sync-fork.yml` | 同步工作流（小时级 cron + 手动） |
-| `.github/workflows/rerun.yml` | PR 验证卡住时一键重跑（手动） |
+| `.github/workflows/rerun.yml` | 验证重跑（手动） |
 | `bump-winget.ps1` | 跟版脚本（与 `winget-local/ci-bump.ps1` 同源） |
 | `sync-fork.ps1` | 同步脚本 |
 | `tools/rerun-validation.py` | 造同 tree 空提交、前移 PR 分支 |
-| `poller/` | 外部轮询器（可选，装了才有自动跟版） |
+| `poller/` | 外部轮询器（可选） |
 
 ## 本地试跑
 
 ```powershell
 $env:GH_TOKEN = 'ghp_...'
 $wd = Join-Path $env:TEMP 'winget-work'; New-Item -ItemType Directory -Force $wd | Out-Null
-.\bump-winget.ps1 -RepoRoot $wd -WorkDir $wd -Fork zhou-dev-design/winget-pkgs -ApiCommit -OpenPr -DryRun
+.\bump-winget.ps1 -RepoRoot $wd -WorkDir $wd -Fork zhou-dev-design/winget-pkgs -ApiCommit -OpenPr -ClaAgree -DryRun
 ```
 
-去掉 `-DryRun` 才会真的写 fork；`-Only <包ID>` 可以只跑一个包。
+去掉 `-DryRun` 才会真的写 fork；`-Only <包ID>` 只跑一个包。
+`-ApiCommit` 模式不要求工作区是 git 仓库（目录只是临时产出）。
 
----
+## 排错：几个常见现象
 
-## PR 验证卡住时，怎么自己重跑
-
-winget-pkgs 的验证只认 moderator 的 `@wingetbot run`（`doc/Moderation.md` 里写死了这是
-moderator 的 Trigger），普通作者发这个指令会被回 `Commenter does not have sufficient privileges`。
-但验证 App 会响应 PR 的 `synchronize` 事件 —— 分支有了新提交就会重新排队。
-
-所以 `rerun.yml` 干的是：**用当前 commit 的同一个 tree 造一个「空提交」，再把分支 ref 指过去**。
-文件一个字节都不变，但 PR head 变了，验证就会起一个全新实例。
-
-用法：Actions → `re-run validation (empty commit)` → Run workflow。
-`branch` 默认填了 VS Code 那个分支，`dry_run` 选 true 可以先看它读到的 head / tree 而不写入。
-
-注意：
-
-- 这只是重新排队，已经确认是 Defender 竞态的话，可能还要再撞一次，重跑一两次是正常的；
-- 空提交会留在 PR 历史里（内容为空，01 检查只看文件差异，不受影响）；
-- 如果维护者已经自己重跑过（PR 时间线里有 `@wingetbot run` by `wingetbot`），就不要重复点。
-
----
-
-## PR 验证卡住时，怎么自己重跑
-
-winget-pkgs 的验证只认 moderator 的 `@wingetbot run`（`doc/Moderation.md` 里写死了这是
-moderator 的 Trigger），普通作者发这个指令会被回 `Commenter does not have sufficient privileges`。
-但验证 App 会响应 PR 的 `synchronize` 事件 —— 分支有了新提交就会重新排队。
-
-所以 `rerun.yml` 干的是：**用当前 commit 的同一个 tree 造一个「空提交」，再把分支 ref 指过去**。
-文件一个字节都不变，但 PR head 变了，验证就会起一个全新实例。
-
-用法：Actions → `re-run validation (empty commit)` → Run workflow。
-`branch` 默认填了 VS Code 那个分支，`dry_run` 选 true 可以先看它读到的 head / tree 而不写入。
-
-注意：
-
-- 这只是重新排队，已经确认是 Defender 竞态的话，可能还要再撞一次，重跑一两次是正常的；
-- 空提交会留在 PR 历史里（内容为空，01 检查只看文件差异，不受影响）；
-- 如果维护者已经自己重跑过（PR 时间线里有 `@wingetbot run` by `wingetbot`），就不要重复点。
+| 现象 | 含义 | 怎么办 |
+| --- | --- | --- |
+| PR 开出来了，但 job 红 | 第一段（写 fork `master`）失败，第二段（开 PR）成功 | 看 Annotations 里的 `::error::`，按 HTTP 状态码判断；PR 本身没问题 |
+| `winget validate 没过` | 生成清单没通过校验 | 注解里带 winget 原始输出，按提示改模板 |
+| 08 红，四包都 `Completed` | 验证机 Defender 扫描撞车 | 等维护者重跑，或自己跑 `rerun.yml` |
+| sync 红（409） | 上游也有同一版本且字节不同 | 按日志提示三选一处理 |
+| `Commenter does not have sufficient privileges` | 你用作者身份发了 `@wingetbot run` | 那是指令只有 moderator 能用，改用 `rerun.yml` |

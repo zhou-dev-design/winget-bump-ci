@@ -323,7 +323,8 @@ function Test-Manifest([string]$Id, [string]$Version) {
     if (-not $wg) { Write-Warn2 'runner 上找不到 winget，跳过 validate'; return $true }
     $out = & winget validate --manifest $dir 2>&1
     if ($LASTEXITCODE -eq 0) { Write-Ok 'winget validate 通过'; return $true }
-    Write-Warn2 "winget validate 失败：`n$($out | Out-String)"
+    $script:LastValidateError = (($out | Out-String).Trim())
+    Write-Warn2 "winget validate 失败：`n$($script:LastValidateError)"
     return $false
 }
 
@@ -413,7 +414,19 @@ function Invoke-GhApi {
         $req['Body'] = ($Body | ConvertTo-Json -Depth 8 -Compress)
         $req['ContentType'] = 'application/json'
     }
-    Invoke-RestMethod @req
+    try {
+        Invoke-RestMethod @req
+    } catch {
+        # PS 自带的报错只说"Response status code does not indicate success"，把状态码和
+        # 响应体一起带出来 —— 失败原因会一路冒到 Actions 的注解里，不用再猜。
+        $code = ''
+        if ($_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { } }
+        $msg = ''
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $msg = $_.ErrorDetails.Message }
+        elseif ($_.Exception.Message) { $msg = $_.Exception.Message }
+        if ($msg.Length -gt 500) { $msg = $msg.Substring(0, 500) }
+        throw "GitHub API $Method $Path → HTTP $code $msg"
+    }
 }
 
 # ---------------------------------------------------------------- CLA 同意
@@ -639,7 +652,10 @@ foreach ($pkg in $packages) {
         if ($missing) { continue }
 
         $relPath = New-VersionFromBase -Id $pkg.Id -Base $have -Version $rel.Version -Specs $rel.Specs -ReleaseDate $rel.ReleaseDate
-        if (-not (Test-Manifest $pkg.Id $rel.Version)) { throw "validate 没过，不提交" }
+        if (-not (Test-Manifest $pkg.Id $rel.Version)) {
+            # 把 winget 的原始输出一起抛出去：注解里能直接看到是哪条没通过
+            throw "validate 没过，不提交：$($script:LastValidateError)"
+        }
         $bumped += [pscustomobject]@{ Id = $pkg.Id; Version = $rel.Version; RelPath = $relPath }
     } catch {
         Write-Warn2 "出错：$($_.Exception.Message)"
