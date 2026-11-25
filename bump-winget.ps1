@@ -328,15 +328,28 @@ function Test-Manifest([string]$Id, [string]$Version) {
     # 而同一份清单在本机 winget 1.30 上是 exit 0。所以：
     #   1) 先加 --ignore-warnings --output-locale en-US，尽量让它直接返回 0、输出稳定英文；
     #   2) 判据以输出文本为准，退出码只作兜底。
-    $argv = @('validate', '--manifest', $dir, '--ignore-warnings', '--output-locale', 'en-US')
-    $out = & winget @argv 2>&1
-    $code = $LASTEXITCODE
-    $text = ((($out | Out-String) -replace "`r", '')).Trim()
-
-    # 老版本 winget 不认识这两个参数时退一步，用原始命令再跑一次
-    if ($code -ne 0 -and $text -match '(?i)unrecognized|unknown (option|argument)|无法识别|未知参数') {
-        Write-Dim 'runner 的 winget 不支持 --ignore-warnings，退回原始命令'
-        $out = & winget validate --manifest $dir 2>&1
+    # runner 上 winget 版本不固定（实测 1.11.510 就认不出 --output-locale），
+    # 所以「能不能用这两个参数」探一次就缓存，后续包直接复用结论。
+    $base = @('validate', '--manifest', $dir)
+    if ($null -eq $script:ValidateFlags) {
+        $probe = $base + @('--ignore-warnings', '--output-locale', 'en-US')
+        $out = & winget @probe 2>&1
+        $code = $LASTEXITCODE
+        $text = ((($out | Out-String) -replace "`r", '')).Trim()
+        # 注意匹配 'not recognized' —— 老 winget 的原话是
+        # "Argument name was not recognized for the current command"，不含 'unrecognized'
+        if ($text -match '(?i)not recognized|unrecognized|unknown (option|argument|command)|无法识别|未知参数') {
+            $script:ValidateFlags = @()
+            Write-Dim 'runner 的 winget 不认识 --ignore-warnings / --output-locale，退回原始命令（判据仍看输出文本）'
+            $out = & winget @base 2>&1
+            $code = $LASTEXITCODE
+            $text = ((($out | Out-String) -replace "`r", '')).Trim()
+        } else {
+            $script:ValidateFlags = @('--ignore-warnings', '--output-locale', 'en-US')
+        }
+    } else {
+        $argv = $base + $script:ValidateFlags
+        $out = & winget @argv 2>&1
         $code = $LASTEXITCODE
         $text = ((($out | Out-String) -replace "`r", '')).Trim()
     }
@@ -646,6 +659,8 @@ $script:failed = $false
 # 记下 validate 没过的 包/版本：PR 阶段要跳过它们，
 # 否则会像 #20 那样「validate 判失败、PR 却照样开出来」，看着自相矛盾且可能推坏清单
 $script:badManifests = @{}
+# winget validate 的可用参数集合（首次调用时探测并缓存）
+$script:ValidateFlags = $null
 foreach ($pkg in $packages) {
     if ($Only -and $Only -ne $pkg.Id) { continue }
     Write-Head "$($pkg.Id)  [$($pkg.Source)]"

@@ -203,7 +203,8 @@ $wd = Join-Path $env:TEMP 'winget-work'; New-Item -ItemType Directory -Force $wd
 | 现象 | 含义 | 怎么办 |
 | --- | --- | --- |
 | PR 开出来了，但 job 红 | 第一段（写 fork `master`）失败，第二段（开 PR）成功 | 看 Annotations 里的 `::error::`，按 HTTP 状态码判断；PR 本身没问题 |
-| `winget validate 失败（exit 1）` 但输出是 `succeeded with warnings` | runner 上的 winget 比清单 schema 旧，把 warning 判成失败（#20 的真因） | 已在脚本里修掉：加 `--ignore-warnings --output-locale en-US`，并以输出文本为准（`succeeded` = 通过）。这类 warning 不影响 PR 那边的校验 |
+| `winget validate 失败（exit 1）` 但输出是 `succeeded with warnings` | runner 上的 winget 比清单 schema 旧，把 warning 判成失败（#20 的真因） | 已修：以输出文本为准（`succeeded` = 通过），warning 只打印 |
+| `Argument name was not recognized: '--output-locale'` | runner 的 winget 太老（实测 v1.11.510），不认这两个开关 | 已修：首次调用探测一次参数能力并缓存，不认就退回原始命令 |
 | `winget validate 失败` 且输出 `Manifest Error: ...` | 生成清单真的不合规 | 注解里带 winget 原始输出，按提示改模板 |
 | 08 红，四包都 `Completed` | 验证机 Defender 扫描撞车 | 等维护者重跑，或自己跑 `rerun.yml` |
 | sync 红（409） | 上游也有同一版本且字节不同 | 按日志提示三选一处理 |
