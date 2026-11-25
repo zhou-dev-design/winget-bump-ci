@@ -1,8 +1,8 @@
-# 独立调度的 winget 清单跟版器
+# winget 清单跟版器（手动触发）
 #
-# 为什么单独开一个仓库：GitHub 文档明确 —— 公共仓库被 fork 之后，
-# scheduled workflows 默认不启用。实测 fork 里 event=schedule 的运行数长期为 0，
-# 而 workflow 的 state 仍显示 active、UI 也不给启用按钮（点不到）。换个非 fork 仓库即可。
+# 为什么改手动（2026-11-25）：#20 那次跑红了 —— PR 已经开出来，但写 fork master 那段挂了，
+# 结果是「有 PR 产出 + job 全红」，看着很迷惑（脚本里两段流程互相独立，见 README）。
+# 跟版本来就不是高频动作（VS Code 一周一版），与其让它自己红，不如想跑时点一下。
 #
 # 它不克隆 winget-pkgs（78 万个文件、近 1GB），全部走 API：
 #   读版本表 → 取基底清单 → 生成新版本 → blobs/trees/commits 写进 fork 的 master → 向上游开 PR
@@ -14,9 +14,6 @@
 name: bump winget manifests
 
 on:
-  schedule:
-    # 每 15 分钟，但避开 :00 / :15 / :30 / :45 —— 整点是调度高峰，实测会晚 15~45 分钟
-    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -45,12 +42,14 @@ jobs:
           }
           Write-Host "GH_TOKEN 已配置（长度 $($env:GH_TOKEN.Length)）"
 
-      - name: 探测新版本 → 生成清单 → 写进 fork → 开 PR
+      # -ClaAgree：开完 PR 自动评论一句 CLA 同意，并给历史遗留还挂着 Needs-CLA 的 PR 补上。
+      # 不评论标签不会掉，PR 永远合不进去（签过一次不免，每个新 PR 都要说一次）。
+      - name: 探测新版本 → 生成清单 → 写进 fork → 开 PR → 补 CLA
         shell: pwsh
         run: |
           $wd = Join-Path $env:RUNNER_TEMP 'winget-work'
           New-Item -ItemType Directory -Force -Path $wd | Out-Null
-          ./bump-winget.ps1 -RepoRoot $wd -WorkDir $wd -Fork $env:FORK -ApiCommit -OpenPr
+          ./bump-winget.ps1 -RepoRoot $wd -WorkDir $wd -Fork $env:FORK -ApiCommit -OpenPr -ClaAgree
 
       - name: 汇总
         if: always()

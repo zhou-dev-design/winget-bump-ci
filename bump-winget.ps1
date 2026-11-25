@@ -26,6 +26,7 @@ param(
     [switch]$ApiCommit,                # 不碰本地 git，用 API 直接写进 fork 的 master
     [string]$Only,
     [switch]$OpenPr,
+    [switch]$ClaAgree,                 # 开完 PR 顺手评论一句 CLA 同意，并给历史遗留的 PR 补上
     [switch]$DryRun
 )
 
@@ -415,6 +416,35 @@ function Invoke-GhApi {
     Invoke-RestMethod @req
 }
 
+# ---------------------------------------------------------------- CLA 同意
+# @microsoft-github-policy-service 要求「每个新 PR 都评论一次 agree」，签过一次也不会免。
+# 忘了评论 → 挂着 Needs-CLA，PR 永远合不进去。所以开完 PR 立刻补一句。
+function Send-ClaAgree {
+    param([int]$Number)
+    try {
+        Invoke-GhApi POST "/repos/$($script:Upstream)/issues/$Number/comments" `
+            @{ body = '@microsoft-github-policy-service agree' } | Out-Null
+        Write-Ok "已在 PR #$Number 评论 CLA 同意"
+    } catch {
+        Write-Warn2 "PR #$Number 评论 CLA 失败：$($_.Exception.Message)"
+    }
+}
+
+# 扫一遍自己名下「开着且缺 CLA」的 PR，把漏掉的补上（含以前遗留的）。
+function Send-ClaAgreeToPending {
+    if (-not $script:PAT) { return }
+    $q = "repo:$($script:Upstream) is:pr is:open label:Needs-CLA author:@me"
+    try {
+        $r = Invoke-GhApi GET "/search/issues?q=$([uri]::EscapeDataString($q))&per_page=20"
+    } catch {
+        Write-Warn2 "查缺 CLA 的 PR 失败：$($_.Exception.Message)"
+        return
+    }
+    $items = @($r.items)
+    if (-not $items) { Write-Dim '没有待补 CLA 的 PR'; return }
+    foreach ($it in $items) { Send-ClaAgree -Number $it.number }
+}
+
 # 把生成好的一个版本目录写进 fork 的 master：一条 commit、原子生效。
 # 不克隆仓库——blobs → trees(base_tree) → commits → PATCH ref，
 # 服务端只沿目标路径新建几层树对象，跟"仓库里有多少文件"无关。
@@ -547,6 +577,7 @@ function New-UpstreamPr {
         body  = (New-PrBody $Id $Version $Specs)
     }
     Write-Ok "PR 已创建：$($pr.html_url)"
+    if ($ClaAgree) { Send-ClaAgree -Number $pr.number }
 }
 
 # ---------------------------------------------------------------- 主流程
@@ -612,6 +643,8 @@ foreach ($pkg in $packages) {
         $bumped += [pscustomobject]@{ Id = $pkg.Id; Version = $rel.Version; RelPath = $relPath }
     } catch {
         Write-Warn2 "出错：$($_.Exception.Message)"
+        # 打成注解，Annotations 面板能直接看到；日志下载要 admin，注解不需要
+        Write-Host "::error title=生成清单失败::$($pkg.Id)：$($_.Exception.Message)"
         $script:failed = $true
     }
 }
@@ -698,10 +731,16 @@ if ($OpenPr) {
                 $prOpened += "$($pkg.Id) $ver"
             } catch {
                 Write-Warn2 "开 PR 失败（$($pkg.Id)）：$($_.Exception.Message)"
+                Write-Host "::error title=开 PR 失败::$($pkg.Id)：$($_.Exception.Message)"
                 $script:failed = $true
             }
         }
     }
+}
+
+if ($ClaAgree -and -not $DryRun) {
+    Write-Head '补齐 CLA 同意'
+    Send-ClaAgreeToPending
 }
 
 Write-Head '汇总'

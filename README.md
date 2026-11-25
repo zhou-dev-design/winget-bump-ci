@@ -96,11 +96,33 @@ schtasks /Create /SC MINUTE /MO 15 /TN winget-poll /F `
 计划任务里勾上「不管用户是否登录都运行」。机器关机期间错过的轮询会在下次开机补上
 （靠状态文件里的 `VSCODE_OK` / `DSH_OK`）。
 
-### 保留 GitHub cron 作为兜底
+### bump 已改为手动触发（2026-11-25）
 
-`bump.yml` / `sync-fork.yml` 里的 `schedule` 暂时留着：它现在不触发，但万一哪天调度器恢复了，
-多跑一次也无害（bump 内部对「已有开着的 PR」「上游已有该版本」都会跳过）。
-等确认外部轮询稳定后可以删掉那几行。
+`bump.yml` 的 `schedule` 已经删掉，只剩 `workflow_dispatch`。原因是 #20 那次：
+PR 开出来了，但写 fork `master` 那段挂了，job 全红却有 PR 产出，看着很迷惑。
+
+脚本里其实是**两段互相独立的流程**：
+
+1. 探测 → 生成清单 → `winget validate` → 用 API 写进 fork 的 `master`；
+2. 从上游 master 建分支 → 写文件 → 向上游开 PR。
+
+任何一段出错都只记 `$script:failed`，另一段照常跑完，最后由 `exit 1` 统一标红 ——
+所以"PR 成功但 job 失败"是正常的组合，不代表 PR 有问题。现在两段出错都会额外打
+`::error::` 注解，在 Actions 的 **Annotations** 面板能直接看到原因（日志下载需要 admin，注解不需要）。
+
+`sync-fork.yml` 仍然保留小时级 cron；`probe.yml` 保留为小时级哨兵，用来观察 GitHub 调度器是否恢复。
+
+### CLA 同意（-ClaAgree）
+
+`@microsoft-github-policy-service` 要求**每个新 PR 都评论一次** `agree`，签过一次不免。
+不评论 → PR 一直挂着 `Needs-CLA`，永远合不进去。
+
+`bump.yml` 现在带 `-ClaAgree`：
+
+- 每开一个新 PR，立刻评论一次；
+- 收尾时再扫一遍自己名下「开着且带 `Needs-CLA`」的 PR，把历史遗留的补上。
+
+**注意**：这条评论是用你的 PAT 以你的身份发的，等于你把 CLA 同意这件事交给了 CI 代发。
 
 ---
 
